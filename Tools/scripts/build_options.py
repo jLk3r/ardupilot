@@ -41,6 +41,10 @@ class Feature:
 # dependencies  : Comma-separated list of feature labels that this feature depends on
 #                 (a single string with commas and no spaces). e.g., 'dependency1,dependency2'.
 BUILD_OPTIONS = [
+    Feature('Mission', 'Motor stop', 'AP_MISSION_MOTOR_STOP_ENABLED',
+            'Local Copter terminal motor-stop mission item', 1, None),
+    Feature('Mission', 'Takeoff UTC', 'AP_MISSION_TAKEOFF_UTC_ENABLED',
+            'Local Copter UTC scheduled takeoff mission item', 1, None),
     Feature('AHRS', 'EKF3', 'HAL_NAVEKF3_AVAILABLE', 'Enable EKF3', 1, None),
     Feature('AHRS', 'EKF2', 'HAL_NAVEKF2_AVAILABLE', 'Enable EKF2', 0, None),
     Feature('AHRS', 'AHRS_EXT', 'AP_EXTERNAL_AHRS_ENABLED', 'Enable External AHRS', 0, None),

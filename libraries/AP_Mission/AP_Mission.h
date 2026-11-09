@@ -302,7 +302,19 @@ public:
         uint8_t video_stream_id;
     };
 
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+    struct PACKED TakeoffUTC_Command {
+        uint32_t utc_s;
+        float altitude_m;
+    };
+    static_assert(sizeof(TakeoffUTC_Command) <= 10, "16-bit mission IDs have ten content bytes");
+#endif
+
     union Content {
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+        TakeoffUTC_Command takeoff_utc;
+#endif
+
         // jump structure
         Jump_Command jump;
 

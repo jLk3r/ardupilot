@@ -1169,6 +1169,27 @@ const AP_Param::GroupInfo ParametersG2::var_info2[] = {
     // @Increment: 0.1
     AP_GROUPINFO("PILOT_TKO_ALT_M", 20, ParametersG2, pilot_takeoff_alt_m, PILOT_TKO_ALT_M_DEFAULT),
 
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+    // @Param: TKOFF_UTC_TOUT
+    // @DisplayName: UTC takeoff ground timeout
+    // @Description: Maximum seconds after scheduled UTC for a started takeoff to leave the ground. No automatic late start or retry. Never disarms an airborne vehicle. Invalid values prevent scheduled takeoff.
+    // @Units: s
+    // @Range: 1 60
+    // @Increment: 1
+    // @User: Standard
+    AP_GROUPINFO("TKOFF_UTC_TOUT", 25, ParametersG2, takeoff_utc_timeout, 10),
+#endif
+
+#if AP_MISSION_MOTOR_STOP_ENABLED
+    // @Param: MIS_MSTOP_VER
+    // @DisplayName: Mission motor stop command version
+    // @Description: Firmware capability marker for the MOTOR_STOP mission command. Version 1 stops the mission and disarms even in flight. Not an enable switch.
+    // @Values: 1:Version 1
+    // @ReadOnly: True
+    // @User: Advanced
+    AP_GROUPINFO_FLAGS("MIS_MSTOP_VER", 26, ParametersG2, mission_motor_stop_version, 1, AP_PARAM_FLAG_INTERNAL_USE_ONLY),
+#endif
+
     // ID 62 is reserved for the AP_SUBGROUPEXTENSION
 
     AP_GROUPEND

@@ -660,6 +660,14 @@ public:
     AP_Int16                failsafe_dr_timeout;
     AP_Float                surftrak_tc;
 
+#if AP_MISSION_MOTOR_STOP_ENABLED
+    AP_Int8 mission_motor_stop_version;
+#endif
+
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+    AP_Int8 takeoff_utc_timeout;
+#endif
+
     // ramp time of throttle during take-off
     AP_Float takeoff_throttle_slew_time;
     AP_Float takeoff_throttle_max;

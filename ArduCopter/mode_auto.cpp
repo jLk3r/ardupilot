@@ -23,6 +23,12 @@
 bool ModeAuto::init(bool ignore_checks)
 {
     auto_RTL = false;
+#if AP_MISSION_MOTOR_STOP_ENABLED
+    mission_motor_stop_pending = false;
+#endif
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+    takeoff_utc.reset();
+#endif
     if (mission.present() || ignore_checks) {
         // reject switching to auto mode if landed with motors armed but first command is not a takeoff (reduce chance of flips)
         if (motors->armed() && copter.ap.land_complete && !mission.starts_with_takeoff_cmd()) {
@@ -99,6 +105,13 @@ void ModeAuto::run()
     } else {
         // check for mission changes
         if (mis_change_detector.check_for_mission_change()) {
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+            if (takeoff_utc.state() == AP_Mission_TakeoffUTC::State::Waiting ||
+                takeoff_utc.state() == AP_Mission_TakeoffUTC::State::Climbing ||
+                takeoff_utc.state() == AP_Mission_TakeoffUTC::State::Launch) {
+                takeoff_utc.abort();
+            }
+#endif
             // if mission is running restart the current command if it is a waypoint or spline command
             if ((mission.state() == AP_Mission::MISSION_RUNNING) && (_mode == SubMode::WP)) {
                 if (mission.restart_current_nav_cmd()) {
@@ -112,6 +125,13 @@ void ModeAuto::run()
 
         mission.update();
     }
+
+#if AP_MISSION_MOTOR_STOP_ENABLED
+    mission_motor_stop_run();
+#endif
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+    takeoff_utc_run();
+#endif
 
     // call the correct auto controller
     switch (_mode) {
@@ -707,7 +727,24 @@ bool ModeAuto::set_speed_down_ms(float speed_down_ms)
 // start_command - this function will be called when the ap_mission lib wishes to start a new command
 bool ModeAuto::start_command(const AP_Mission::Mission_Command& cmd)
 {
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+    if (AP_Mission::is_nav_cmd(cmd) && cmd.id != MAV_CMD_WAYPOINT_USER_1) {
+        takeoff_utc.reset();
+    }
+#endif
     switch(cmd.id) {
+#if AP_MISSION_MOTOR_STOP_ENABLED
+    case MAV_CMD_WAYPOINT_USER_2:
+        // A NAV item waits for NAV_DELAY. Stop now so following DO items cannot run.
+        mission.stop();
+        mission_motor_stop_pending = true;
+        break;
+#endif
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+    case MAV_CMD_WAYPOINT_USER_1:
+        do_takeoff_utc(cmd);
+        break;
+#endif
 
     ///
     /// navigation commands
@@ -948,6 +985,15 @@ bool ModeAuto::verify_command(const AP_Mission::Mission_Command& cmd)
     bool cmd_complete = false;
 
     switch (cmd.id) {
+#if AP_MISSION_MOTOR_STOP_ENABLED
+    case MAV_CMD_WAYPOINT_USER_2:
+        return false;
+#endif
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+    case MAV_CMD_WAYPOINT_USER_1:
+        cmd_complete = takeoff_utc.state() == AP_Mission_TakeoffUTC::State::Airborne && verify_takeoff();
+        break;
+#endif
     //
     // navigation commands
     //
@@ -1517,6 +1563,84 @@ void ModeAuto::subtract_pos_offsets(Location& target_loc) const
 /********************************************************************************/
 // Nav (Must) commands
 /********************************************************************************/
+
+#if AP_MISSION_MOTOR_STOP_ENABLED
+void ModeAuto::mission_motor_stop_run()
+{
+    if (!mission_motor_stop_pending) {
+        return;
+    }
+    mission_motor_stop_pending = false;
+    // Disarm resets mission state, so do it after the mission callback returns.
+    motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::SHUT_DOWN);
+    copter.arming.disarm(AP_Arming::Method::TERMINATION);
+    mission.stop();
+    set_submode(SubMode::LOITER);
+    GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "MOTOR_STOP: motors off; mission stopped");
+}
+#endif
+
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+void ModeAuto::do_takeoff_utc(const AP_Mission::Mission_Command& cmd)
+{
+    takeoff_utc_abort_handled = false;
+    takeoff_utc_alt_m = cmd.content.takeoff_utc.altitude_m;
+    uint64_t utc_us = 0;
+#if AP_RTC_ENABLED
+    AP::rtc().get_utc_usec(utc_us);
+#endif
+    const bool valid = takeoff_utc.prepare(utc_us, AP_HAL::micros64(),
+                                          uint64_t(cmd.content.takeoff_utc.utc_s) * 1000000,
+                                          copter.g2.takeoff_utc_timeout.get());
+    if (!valid || !copter.ap.land_complete || !isfinite(takeoff_utc_alt_m) ||
+        takeoff_utc_alt_m < 1 || takeoff_utc_alt_m > 1000 || copter.is_tradheli()) {
+        takeoff_utc.abort();
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "TAKEOFF_UTC: invalid/expired request");
+        return;
+    }
+    set_submode(SubMode::LOITER);
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "TAKEOFF_UTC: waiting for UTC");
+}
+
+void ModeAuto::takeoff_utc_run()
+{
+    using TakeoffUTCState = AP_Mission_TakeoffUTC::State;
+    if (takeoff_utc.state() == TakeoffUTCState::Idle || takeoff_utc.state() == TakeoffUTCState::Airborne) {
+        return;
+    }
+    uint64_t utc_us = 0;
+#if AP_RTC_ENABLED
+    AP::rtc().get_utc_usec(utc_us);
+#endif
+    const bool ready = motors->armed() && !copter.ap.in_arming_delay && motors->get_interlock() &&
+                       !SRV_Channels::get_emergency_stop() && !copter.any_failsafe_triggered() &&
+                       copter.position_ok() && copter.current_loc.initialised() &&
+                       (copter.ap.auto_armed || option_is_enabled(Option::AllowTakeOffWithoutRaisingThrottle));
+    const TakeoffUTCState utc_state = takeoff_utc.update(utc_us, AP_HAL::micros64(), ready, motors->armed(),
+                                                       !copter.ap.land_complete);
+    if (utc_state == TakeoffUTCState::Launch) {
+        Location dest = copter.current_loc;
+        dest.offset_up_m(takeoff_utc_alt_m);
+        takeoff_start(dest);
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "TAKEOFF_UTC: starting");
+    } else if (utc_state == TakeoffUTCState::Aborted && !takeoff_utc_abort_handled) {
+        takeoff_utc_abort_handled = true;
+        mission.stop();
+        // Land detector alone is insufficient while takeoff thrust is ramping.
+        // Never force disarm: uncertain ground contact uses the existing landing controller.
+        if (copter.ap.land_complete &&
+            attitude_control->get_throttle_in() <= copter.get_non_takeoff_throttle() &&
+            fabsf(pos_control->get_vel_estimate_U_ms()) < 0.2f) {
+            set_submode(SubMode::LOITER);
+            copter.arming.disarm(AP_Arming::Method::LANDED);
+            mission.stop();
+        } else {
+            land_start();
+        }
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "TAKEOFF_UTC: cancelled; operator required");
+    }
+}
+#endif
 
 // do_takeoff - initiate takeoff navigation command
 void ModeAuto::do_takeoff(const AP_Mission::Mission_Command& cmd)

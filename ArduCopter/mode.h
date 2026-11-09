@@ -4,6 +4,9 @@
 #include <AP_Math/chirp.h>
 #include <AP_ExternalControl/AP_ExternalControl_config.h> // TODO why is this needed if Copter.h includes this
 #include <AP_HAL/Semaphores.h>
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+#include <AP_Mission/AP_Mission_TakeoffUTC.h>
+#endif
 
 #if AP_COPTER_ADVANCED_FAILSAFE_ENABLED
 #include "afs_copter.h"
@@ -688,6 +691,17 @@ private:
     // should be used when the location will be used as a target for the position controller
     void subtract_pos_offsets(Location& target_loc) const;
 
+#if AP_MISSION_TAKEOFF_UTC_ENABLED
+    AP_Mission_TakeoffUTC takeoff_utc;
+    float takeoff_utc_alt_m;
+    bool takeoff_utc_abort_handled;
+    void do_takeoff_utc(const AP_Mission::Mission_Command& cmd);
+    void takeoff_utc_run();
+#endif
+#if AP_MISSION_MOTOR_STOP_ENABLED
+    bool mission_motor_stop_pending;
+    void mission_motor_stop_run();
+#endif
     void do_takeoff(const AP_Mission::Mission_Command& cmd);
     void do_nav_wp(const AP_Mission::Mission_Command& cmd);
     bool set_next_wp(const AP_Mission::Mission_Command& current_cmd, const Location &default_loc);

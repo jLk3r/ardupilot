@@ -205,6 +205,9 @@ bool AP_Mission::is_takeoff_next(uint16_t cmd_index)
         case MAV_CMD_NAV_VTOL_TAKEOFF:
         case MAV_CMD_NAV_TAKEOFF:
         case MAV_CMD_NAV_TAKEOFF_LOCAL:
+#if AP_MISSION_TAKEOFF_UTC_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduCopter)
+        case MAV_CMD_WAYPOINT_USER_1:
+#endif
             return true;
         // any of these are considered "skippable" when determining if
         // we "start with a takeoff command"
@@ -541,6 +544,12 @@ bool AP_Mission::is_nav_cmd(const Mission_Command& cmd)
 {
     // NAV commands all have ids below MAV_CMD_NAV_LAST, plus some exceptions
     return (cmd.id <= MAV_CMD_NAV_LAST ||
+#if AP_MISSION_MOTOR_STOP_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduCopter)
+            cmd.id == MAV_CMD_WAYPOINT_USER_2 ||
+#endif
+#if AP_MISSION_TAKEOFF_UTC_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduCopter)
+            cmd.id == MAV_CMD_WAYPOINT_USER_1 ||
+#endif
             cmd.id == MAV_CMD_NAV_SET_YAW_SPEED ||
             cmd.id == MAV_CMD_NAV_SCRIPT_TIME ||
             cmd.id == MAV_CMD_NAV_ATTITUDE_TIME);
@@ -581,6 +590,9 @@ int32_t AP_Mission::get_next_ground_course_cd(int32_t default_angle)
     switch (cmd.id) {
     case MAV_CMD_NAV_GUIDED_ENABLE:
     case MAV_CMD_NAV_DELAY:
+#if AP_MISSION_MOTOR_STOP_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduCopter)
+    case MAV_CMD_WAYPOINT_USER_2:
+#endif
         return default_angle;
 
     case MAV_CMD_NAV_SET_YAW_SPEED:
@@ -1157,6 +1169,40 @@ MAV_MISSION_RESULT AP_Mission::mavlink_int_to_mission_cmd(const mavlink_mission_
         }
         break;
 
+#if AP_MISSION_MOTOR_STOP_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduCopter)
+    case MAV_CMD_WAYPOINT_USER_2:
+        if (packet.frame != MAV_FRAME_MISSION) {
+            return MAV_MISSION_UNSUPPORTED_FRAME;
+        }
+        if (!is_zero(packet.param1) || !is_zero(packet.param2) || !is_zero(packet.param3) ||
+            !is_zero(packet.param4) || packet.x != 0 || packet.y != 0 || !is_zero(packet.z)) {
+            return MAV_MISSION_INVALID;
+        }
+        break;
+#endif
+
+#if AP_MISSION_TAKEOFF_UTC_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduCopter)
+    case MAV_CMD_WAYPOINT_USER_1:
+        if (packet.frame != MAV_FRAME_GLOBAL_RELATIVE_ALT && packet.frame != MAV_FRAME_GLOBAL_RELATIVE_ALT_INT) {
+            return MAV_MISSION_UNSUPPORTED_FRAME;
+        }
+        if (packet.param1 < 18262 || packet.param1 > 49709 || packet.param1 > floorf(packet.param1)) {
+            return MAV_MISSION_INVALID_PARAM1;
+        }
+        if (packet.param2 < 0 || packet.param2 >= 86400 || packet.param2 > floorf(packet.param2)) {
+            return MAV_MISSION_INVALID_PARAM2;
+        }
+        if (!is_zero(packet.param3) || !is_zero(packet.param4) || packet.x != 0 || packet.y != 0) {
+            return MAV_MISSION_INVALID;
+        }
+        if (!isfinite(packet.z) || packet.z < 1 || packet.z > 1000) {
+            return MAV_MISSION_INVALID_PARAM7;
+        }
+        cmd.content.takeoff_utc.utc_s = uint32_t(packet.param1) * 86400U + uint32_t(packet.param2);
+        cmd.content.takeoff_utc.altitude_m = packet.z;
+        break;
+#endif
+
     case MAV_CMD_NAV_TAKEOFF:                           // MAV ID: 22
         cmd.p1 = packet.param1;                         // minimum pitch (plane only)
         break;
@@ -1678,6 +1724,21 @@ bool AP_Mission::mission_cmd_to_mavlink_int(const AP_Mission::Mission_Command& c
         packet.param1 = cmd.p1;                        // abort target altitude(m)  (plane only)
         packet.param4 = cmd.content.location.loiter_ccw ? -1 : 1; // yaw direction, (plane deepstall only)
         break;
+
+#if AP_MISSION_MOTOR_STOP_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduCopter)
+    case MAV_CMD_WAYPOINT_USER_2:
+        packet.frame = MAV_FRAME_MISSION;
+        break;
+#endif
+
+#if AP_MISSION_TAKEOFF_UTC_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduCopter)
+    case MAV_CMD_WAYPOINT_USER_1:
+        packet.frame = MAV_FRAME_GLOBAL_RELATIVE_ALT;
+        packet.param1 = cmd.content.takeoff_utc.utc_s / 86400U;
+        packet.param2 = cmd.content.takeoff_utc.utc_s % 86400U;
+        packet.z = cmd.content.takeoff_utc.altitude_m;
+        break;
+#endif
 
     case MAV_CMD_NAV_TAKEOFF:                           // MAV ID: 22
         packet.param1 = cmd.p1;                         // minimum pitch (plane only)
@@ -2791,6 +2852,9 @@ bool AP_Mission::is_landing_type_cmd(uint16_t id) const
 bool AP_Mission::is_takeoff_type_cmd(uint16_t id) const
 {
     switch (id) {
+#if AP_MISSION_TAKEOFF_UTC_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduCopter)
+    case MAV_CMD_WAYPOINT_USER_1:
+#endif
     case MAV_CMD_NAV_TAKEOFF:
     case MAV_CMD_NAV_VTOL_TAKEOFF:
         return true;
@@ -2802,6 +2866,14 @@ bool AP_Mission::is_takeoff_type_cmd(uint16_t id) const
 const char *AP_Mission::Mission_Command::type() const
 {
     switch (id) {
+#if AP_MISSION_MOTOR_STOP_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduCopter)
+    case MAV_CMD_WAYPOINT_USER_2:
+        return "MOTOR_STOP";
+#endif
+#if AP_MISSION_TAKEOFF_UTC_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduCopter)
+    case MAV_CMD_WAYPOINT_USER_1:
+        return "TAKEOFF_UTC";
+#endif
     case MAV_CMD_NAV_WAYPOINT:
         return "WP";
     case MAV_CMD_NAV_SPLINE_WAYPOINT:

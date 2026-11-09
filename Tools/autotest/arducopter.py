@@ -5550,6 +5550,162 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         if error > 2:
             raise NotAchievedException("delay outside expectations")
 
+    def MissionMotorStop(self):
+        """Finish NAV_DELAY before stopping airborne motors; never run following mission actions."""
+        self.set_parameters({"AUTO_OPTIONS": 3, "DISARM_DELAY": 0, "SERVO9_FUNCTION": 0})
+        self.change_mode('LOITER')
+        self.wait_ready_to_arm()
+        self.assert_parameter_value("MIS_MSTOP_VER", 1)
+        self.set_servo(9, 1500)
+        items = self.create_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 10),
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 5, 0, 10),
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 10, 0, 10),
+            (mavutil.mavlink.MAV_CMD_NAV_DELAY, 0, 0, 0,
+             {"p1": 3, "frame": mavutil.mavlink.MAV_FRAME_GLOBAL}),
+            (mavutil.mavlink.MAV_CMD_WAYPOINT_USER_2, 0, 0, 0,
+             {"frame": mavutil.mavlink.MAV_FRAME_MISSION}),
+            (mavutil.mavlink.MAV_CMD_DO_SET_SERVO, 0, 0, 0, {"p1": 9}),
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 20),
+            (mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM, 0, 0, 20),
+        ])
+        items[6].param2 = 1900
+        self.check_mission_upload_download(items)
+        self.context_set_message_rate_hz('SERVO_OUTPUT_RAW', 20)
+        self.context_set_message_rate_hz('GLOBAL_POSITION_INT', 20)
+        events = {}
+
+        def record_termination(mav, message):
+            if message.get_type() == 'STATUSTEXT':
+                if message.text == 'Delaying 3 sec':
+                    events['delay'] = self.get_sim_time_cached()
+                if message.text == 'MOTOR_STOP: motors off; mission stopped':
+                    events['stop'] = self.get_sim_time_cached()
+                    events['altitude'] = mav.messages['GLOBAL_POSITION_INT'].relative_alt * 0.001
+            if message.get_type() == 'SERVO_OUTPUT_RAW' and message.servo9_raw == 1900:
+                raise NotAchievedException("A DO item after MOTOR_STOP executed")
+
+        self.install_message_hook_context(record_termination)
+        self.context_collect('STATUSTEXT')
+        self.arm_vehicle()
+        self.change_mode('AUTO')
+        self.wait_statustext('MOTOR_STOP: motors off; mission stopped', check_context=True, timeout=60)
+        if 'delay' not in events or 'stop' not in events:
+            raise NotAchievedException("Missing delay or termination event")
+        elapsed = events['stop'] - events['delay']
+        if not 2.9 <= elapsed <= 3.5:
+            raise NotAchievedException("MOTOR_STOP did not follow the three-second delay: %s" % elapsed)
+        if events['altitude'] < 8:
+            raise NotAchievedException("Motor stop was not executed in flight")
+        self.wait_disarmed(timeout=2)
+        minimum = self.get_parameter('MOT_PWM_MIN')
+        for channel in range(1, 5):
+            self.wait_servo_channel_value(channel, minimum, timeout=2)
+        self.delay_sim_time(5, reason="check terminal mission does not continue or rearm")
+        if self.armed():
+            raise NotAchievedException("Terminal mission rearmed")
+        self.wait_servo_channel_value(9, 1500)
+        current = self.assert_receive_message('MISSION_CURRENT')
+        if current.mission_state == mavutil.mavlink.MISSION_STATE_ACTIVE:
+            raise NotAchievedException("Terminal mission is still active")
+        self.reboot_sitl()
+
+    def MissionMotorStopDisarmed(self):
+        """An already disarmed vehicle can process the terminal item without starting motors."""
+        self.change_mode('LOITER')
+        self.wait_ready_to_arm()
+        items = self.create_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_WAYPOINT_USER_2, 0, 0, 0,
+             {"frame": mavutil.mavlink.MAV_FRAME_MISSION}),
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 10),
+        ])
+        self.check_mission_upload_download(items)
+        self.context_collect('STATUSTEXT')
+        self.change_mode('AUTO')
+        self.wait_statustext('MOTOR_STOP: motors off; mission stopped', check_context=True)
+        self.delay_sim_time(3, reason="ensure no implicit arm or mission continuation")
+        if self.armed():
+            raise NotAchievedException("Disarmed terminal mission armed the vehicle")
+        self.assert_altitude(0, accuracy=0.5, relative=True)
+
+    def takeoff_utc_test_mission(self, delay_s, altitude=15):
+        """Upload and read back the local UTC command without losing its date or altitude."""
+        utc = self.assert_receive_message('SYSTEM_TIME', timeout=10).time_unix_usec
+        if utc == 0:
+            raise PreconditionFailedException("No UTC clock")
+        target = int(utc // 1000000) + delay_s
+        items = self.create_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, altitude),
+            (mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM, 0, 0, altitude),
+        ])
+        item = items[1]
+        item.command = mavutil.mavlink.MAV_CMD_WAYPOINT_USER_1
+        item.param1 = target // 86400
+        item.param2 = target % 86400
+        item.param3 = 0
+        item.param4 = 0
+        item.x = 0
+        item.y = 0
+        self.check_mission_upload_download(items)
+        return target
+
+    def TakeoffUTC(self):
+        """Wait on the ground, launch at UTC, and remain airborne beyond the ground timeout."""
+        self.set_parameters({"AUTO_OPTIONS": 3, "DISARM_DELAY": 0})
+        self.change_mode('LOITER')
+        self.wait_ready_to_arm()
+        target = self.takeoff_utc_test_mission(20)
+        self.context_collect('STATUSTEXT')
+        self.arm_vehicle()
+        self.change_mode('AUTO')
+        self.wait_statustext('TAKEOFF_UTC: waiting', check_context=True)
+        while True:
+            utc = self.assert_receive_message('SYSTEM_TIME', timeout=10).time_unix_usec / 1e6
+            if utc >= target - 1:
+                break
+            self.assert_altitude(0, accuracy=0.5, relative=True)
+        self.wait_statustext('TAKEOFF_UTC: starting', check_context=True, timeout=10)
+        self.wait_altitude(14, 16, relative=True, timeout=40)
+        self.delay_sim_time(12, reason="verify no timeout disarm or automatic retry")
+        if not self.armed():
+            raise NotAchievedException("Ground timeout disarmed an airborne vehicle")
+        self.change_mode('LAND')
+        self.wait_disarmed()
+
+    def TakeoffUTCExpired(self):
+        """A stale UTC item must cancel on the ground and never progress to the next item."""
+        self.set_parameters({"AUTO_OPTIONS": 3, "DISARM_DELAY": 0})
+        self.change_mode('LOITER')
+        self.wait_ready_to_arm()
+        self.takeoff_utc_test_mission(-2)
+        self.context_collect('STATUSTEXT')
+        self.arm_vehicle()
+        self.change_mode('AUTO')
+        self.wait_statustext('TAKEOFF_UTC: cancelled', check_context=True)
+        self.wait_disarmed(timeout=10)
+        self.delay_sim_time(12, reason="verify no timeout disarm or automatic retry")
+        self.assert_altitude(0, accuracy=0.5, relative=True)
+        if self.armed():
+            raise NotAchievedException("Expired launch retried")
+
+    def TakeoffUTCGroundTimeout(self):
+        """A one-second configured deadline cancels a launch still spooling on the ground."""
+        self.set_parameters({"AUTO_OPTIONS": 3, "DISARM_DELAY": 0,
+                             "TKOFF_UTC_TOUT": 1, "MOT_SPOOL_TIME": 5})
+        self.change_mode('LOITER')
+        self.wait_ready_to_arm()
+        self.takeoff_utc_test_mission(20)
+        self.context_collect('STATUSTEXT')
+        self.arm_vehicle()
+        self.change_mode('AUTO')
+        self.wait_statustext('TAKEOFF_UTC: starting', check_context=True, timeout=30)
+        self.wait_statustext('TAKEOFF_UTC: cancelled', check_context=True, timeout=5)
+        self.wait_disarmed(timeout=10)
+        self.delay_sim_time(12, reason="verify no timeout disarm or automatic retry")
+        self.assert_altitude(0, accuracy=0.5, relative=True)
+        if self.armed():
+            raise NotAchievedException("Timed out launch retried")
+
     def NavDelayTakeoffAbsTime(self):
         """make sure taking off at a specific time works"""
         self.load_mission("copter_nav_delay_takeoff.txt")
@@ -13570,6 +13726,11 @@ class AutoTestCopter(vehicle_test_suite.TestSuite):
         '''return list of all tests'''
         ret = super(AutoTestCopter, self).tests()  # about 5 mins and ~20 initial tests from autotest/vehicle_test_suite.py
         ret.extend([
+             self.MissionMotorStop,
+             self.MissionMotorStopDisarmed,
+             self.TakeoffUTC,
+             self.TakeoffUTCExpired,
+             self.TakeoffUTCGroundTimeout,
              self.NavDelayTakeoffAbsTime,
              self.NavDelayAbsTime,
              self.NavDelay,
